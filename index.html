@@ -404,7 +404,8 @@
       var BASE_HEAT = 0.22;
       var heat = BASE_HEAT;              /* 0..1 ember intensity */
       var userCount = 0, userShown = 0;
-      var globalCount = 284517, globalShown = 284517;
+      var globalCount = 0, globalShown = 0;
+      var serverTotal = 0, pendingGrains = 0;
       var smokeAcc = 0, moteAcc = 0, tickerAcc = 0, wispAcc = 0, hazeAcc = 0;
 
       /* ---------------- Real photographic textures ---------------- */
@@ -562,7 +563,7 @@
 
       function grainImpact(g) {
         heat = Math.min(1, heat + 0.1);
-        userCount += 1; globalCount += 1;
+        userCount += 1; pendingGrains += 1;
         burstSparks(g.x, bowl.y - 2, 10 + Math.floor(Math.random() * 7));
         for (var i = 0; i < 9; i++) spawnSmoke(1);
         if (Math.random() < 0.7) spawnWisp();
@@ -588,10 +589,49 @@
           if (ac.state === "suspended") ac.resume();
           startAmbient();
         }
+        /* Slow sacred chord pad — detuned triangle "voices" breathing
+           through a lowpass, one chord crossfading into the next */
+        var PAD_CHORDS = [
+          [146.83, 174.61, 220.00, 293.66],
+          [116.54, 146.83, 174.61, 233.08],
+          [130.81, 164.81, 196.00, 261.63],
+          [110.00, 146.83, 174.61, 220.00]
+        ];
+        function startPad(bus) {
+          if (!ambientNodes || !ac) return;
+          var padBus = ac.createGain(); padBus.gain.value = 1.4;
+          var pf = ac.createBiquadFilter(); pf.type = "lowpass"; pf.frequency.value = 850;
+          padBus.connect(pf); pf.connect(bus);
+          var idx = 0;
+          function playChord() {
+            if (!ambientNodes) return;
+            var chord = PAD_CHORDS[idx % PAD_CHORDS.length]; idx++;
+            var t = ac.currentTime;
+            var mine = [];
+            chord.forEach(function (f) {
+              [-4, 4].forEach(function (det) {
+                var o = ac.createOscillator(); o.type = "triangle";
+                o.frequency.value = f; o.detune.value = det;
+                var vg = ac.createGain(); vg.gain.value = 0;
+                vg.gain.linearRampToValueAtTime(0.5, t + 3.5);
+                vg.gain.setValueAtTime(0.5, t + 8.5);
+                vg.gain.linearRampToValueAtTime(0, t + 12);
+                o.connect(vg); vg.connect(padBus);
+                o.start(t); o.stop(t + 12.2);
+                mine.push(o);
+              });
+            });
+            if (ambientNodes) {
+              ambientNodes.padOscs = (ambientNodes.padOscs || []).concat(mine);
+              ambientNodes.padTimer = setTimeout(playChord, 9000);
+            }
+          }
+          playChord();
+        }
         function startAmbient() {
           if (!ac || ambientNodes || !enabled) return;
           var g = ac.createGain(); g.gain.value = 0.0;
-          g.gain.linearRampToValueAtTime(0.035, ac.currentTime + 3);
+          g.gain.linearRampToValueAtTime(0.05, ac.currentTime + 3);
           var filt = ac.createBiquadFilter();
           filt.type = "lowpass"; filt.frequency.value = 420;
           var o1 = ac.createOscillator(); o1.type = "sine"; o1.frequency.value = 110;
@@ -604,14 +644,16 @@
           o1.connect(filt); o2.connect(filt); o3.connect(g3); g3.connect(filt);
           filt.connect(g); g.connect(master);
           o1.start(); o2.start(); o3.start(); lfo.start();
-          ambientNodes = { g: g, oscs: [o1, o2, o3, lfo] };
+          ambientNodes = { g: g, oscs: [o1, o2, o3, lfo], padOscs: [], padTimer: null };
           scheduleBell();
+          startPad(g);
         }
         function stopAmbient() {
           if (!ambientNodes) return;
           var nodes = ambientNodes; ambientNodes = null;
+          if (nodes.padTimer) { clearTimeout(nodes.padTimer); nodes.padTimer = null; }
           nodes.g.gain.linearRampToValueAtTime(0, ac.currentTime + 0.8);
-          setTimeout(function () { nodes.oscs.forEach(function (o) { try { o.stop(); } catch (e) {} }); }, 1000);
+          setTimeout(function () { nodes.oscs.concat(nodes.padOscs || []).forEach(function (o) { try { o.stop(); } catch (e) {} }); }, 1000);
           if (bellTimer) { clearTimeout(bellTimer); bellTimer = null; }
         }
         function scheduleBell() {
@@ -624,7 +666,7 @@
         function bell() {
           if (!ac || !enabled) return;
           var t = ac.currentTime;
-          var base = 392;
+          var base = [293.66, 329.63, 392][Math.floor(Math.random() * 3)];
           [[1, 0.05, 5.5], [2.02, 0.028, 3.6], [2.74, 0.016, 2.2], [4.1, 0.008, 1.2]].forEach(function (p) {
             var o = ac.createOscillator(); o.type = "sine"; o.frequency.value = base * p[0];
             var og = ac.createGain();
@@ -729,6 +771,32 @@
         globalEl.textContent = fmt(globalShown);
       }
 
+      /* ---------------- Real worldwide counter (server) ---------------- */
+      var COUNT_API = "https://khunk.vercel.app/api/count";
+      function fetchTotal() {
+        fetch(COUNT_API, { cache: "no-store" })
+          .then(function (r) { return r.json(); })
+          .then(function (j) { if (j && typeof j.count === "number") serverTotal = j.count; })
+          .catch(function () {});
+      }
+      function flushGrains(useBeacon) {
+        if (pendingGrains <= 0) return;
+        var n = pendingGrains; pendingGrains = 0;
+        var body = JSON.stringify({ n: n });
+        if (useBeacon && navigator.sendBeacon) {
+          if (navigator.sendBeacon(COUNT_API, new Blob([body], { type: "text/plain" }))) { serverTotal += n; return; }
+        }
+        fetch(COUNT_API, { method: "POST", headers: { "Content-Type": "application/json" }, body: body, keepalive: true })
+          .then(function (r) { return r.json(); })
+          .then(function (j) { if (j && typeof j.count === "number") serverTotal = j.count; else serverTotal += n; })
+          .catch(function () { pendingGrains += n; });
+      }
+      fetchTotal();
+      setInterval(function () { flushGrains(false); }, 3000);
+      setInterval(fetchTotal, 30000);
+      document.addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") flushGrains(true); });
+      window.addEventListener("pagehide", function () { flushGrains(true); });
+
       /* ---------------- Main loop ---------------- */
       var last = performance.now();
       function frame(now) {
@@ -739,12 +807,9 @@
         /* heat decays back toward the idle glow */
         heat += (BASE_HEAT - heat) * Math.min(1, dt * 0.25);
 
-        /* worldwide ticker: other people, elsewhere, adding grains */
-        tickerAcc += dt;
-        if (tickerAcc > 2.4) {
-          tickerAcc = 0;
-          globalCount += 1 + Math.floor(Math.random() * 3);
-        }
+        /* worldwide total is REAL: it moves only when grains are
+           actually burned, here or by other visitors (server-synced) */
+        globalCount = serverTotal + pendingGrains;
 
         /* Smoke emission scales with the heat AND with how much incense
            has been burned in total: the more grains, the thicker the
