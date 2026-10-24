@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
-    <link rel="icon" href="data:," />
-    <title>Virtual Khunk — Վիրտուալ Խունկ</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23121214'/%3E%3Cpath d='M32 7c6 10 14 16 14 27a14 14 0 1 1-28 0c0-11 8-17 14-27z' fill='%23D4AF37'/%3E%3Ccircle cx='32' cy='40' r='6' fill='%23FF8C00'/%3E%3C/svg%3E" />
+    <title>Khunk — Վիրտուալ Խունկ</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -294,7 +294,7 @@
             <path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M4.9 4.9l1.6 1.6M17.5 17.5l1.6 1.6M19.1 4.9l-1.6 1.6M6.5 17.5l-1.6 1.6"/>
           </svg>
         </button>
-        <button class="icon-btn" id="infoBtn" type="button" aria-label="About Virtual Khunk" title="About">
+        <button class="icon-btn" id="infoBtn" type="button" aria-label="About Khunk" title="About">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
             <circle cx="12" cy="12" r="9"/>
             <path d="M12 11v5.4"/><circle cx="12" cy="7.6" r="0.6" fill="currentColor"/>
@@ -365,7 +365,7 @@
           resin — <a href="https://miraclebotanicals.com/collections/frankincense-resin" target="_blank" rel="noopener">Miracle Botanicals</a> and
           <a href="https://www.worldincensestore.com/listing/656189353/frankincense-resin-granular-incense-a" target="_blank" rel="noopener">World Incense Store</a>.
         </p>
-        <button class="modal-close" id="modalClose" type="button">Return to the censer</button>
+        <button class="modal-close" id="modalClose" type="button" aria-label="Close">Return to the censer</button>
       </div>
     </div>
 
@@ -572,7 +572,8 @@
 
       /* ---------------- Audio (Web Audio, all synthesized) ---------------- */
       var AudioFX = (function () {
-        var ac = null, master = null, ambientNodes = null, enabled = true, bellTimer = null;
+        var ac = null, master = null, ambientNodes = null, bellTimer = null;
+        var enabled = (function () { try { return localStorage.getItem("khunk-sound") !== "off"; } catch (e) { return true; } })();
 
         function ensure() {
           if (ac) return true;
@@ -731,14 +732,24 @@
         if (!backdrop.hidden) return;
         addIncense(e.clientX, e.clientY);
       });
+      document.addEventListener("keydown", function (e) {
+        if (e.repeat) return;
+        if (e.key !== " " && e.key !== "Enter") return;
+        if (e.target.closest && (e.target.closest("button") || e.target.closest(".modal"))) return;
+        if (!backdrop.hidden) return;
+        e.preventDefault();
+        addIncense(W * (0.35 + Math.random() * 0.3), H * 0.22);
+      });
 
       /* Buttons */
+      try { var savedTheme = localStorage.getItem("khunk-theme"); if (savedTheme) document.documentElement.setAttribute("data-theme", savedTheme); } catch (e) {}
       var soundBtn = document.getElementById("soundBtn");
       soundBtn.addEventListener("click", function () {
         var on = !AudioFX.isEnabled();
         AudioFX.resume();
         AudioFX.setEnabled(on);
         soundBtn.setAttribute("aria-pressed", on ? "true" : "false");
+        try { localStorage.setItem("khunk-sound", on ? "on" : "off"); } catch (e) {}
       });
 
       var themeBtn = document.getElementById("themeBtn");
@@ -747,7 +758,11 @@
         var light = root.getAttribute("data-theme") !== "light";
         root.setAttribute("data-theme", light ? "light" : "dark");
         themeBtn.setAttribute("aria-pressed", light ? "true" : "false");
+        try { localStorage.setItem("khunk-theme", light ? "light" : "dark"); } catch (e) {}
       });
+
+      if (!AudioFX.isEnabled()) soundBtn.setAttribute("aria-pressed", "false");
+      if (document.documentElement.getAttribute("data-theme") === "light") themeBtn.setAttribute("aria-pressed", "true");
 
       var infoBtn = document.getElementById("infoBtn");
       var modalClose = document.getElementById("modalClose");
@@ -773,29 +788,51 @@
 
       /* ---------------- Real worldwide counter (server) ---------------- */
       var COUNT_API = "https://khunk.vercel.app/api/count";
+      var outbox = [];            /* immutable grain batches awaiting the server: {id, n} */
+      var maxServerSeen = 0;
+      function batchId() { return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10); }
+      function outboxSum() { var s = 0; for (var i = 0; i < outbox.length; i++) s += outbox[i].n; return s; }
+      function noteServerTotal(v) {
+        if (typeof v !== "number" || !isFinite(v)) return;
+        if (v > maxServerSeen) {
+          maxServerSeen = v;
+          try { localStorage.setItem("khunk-total", String(v)); } catch (e) {}
+        }
+        serverTotal = maxServerSeen;   /* the true counter never decreases */
+      }
+      try { var cachedTotal = parseInt(localStorage.getItem("khunk-total") || "0", 10); if (cachedTotal > 0) noteServerTotal(cachedTotal); } catch (e) {}
       function fetchTotal() {
         fetch(COUNT_API, { cache: "no-store" })
           .then(function (r) { return r.json(); })
-          .then(function (j) { if (j && typeof j.count === "number") serverTotal = j.count; })
+          .then(function (j) { if (j) noteServerTotal(j.count); })
           .catch(function () {});
       }
-      function flushGrains(useBeacon) {
-        if (pendingGrains <= 0) return;
-        var n = pendingGrains; pendingGrains = 0;
-        var body = JSON.stringify({ n: n });
+      var flushing = false;
+      function pumpOutbox(useBeacon) {
+        if (pendingGrains > 0) { outbox.push({ id: batchId(), n: pendingGrains }); pendingGrains = 0; }
+        if (!outbox.length) return;
         if (useBeacon && navigator.sendBeacon) {
-          if (navigator.sendBeacon(COUNT_API, new Blob([body], { type: "text/plain" }))) { serverTotal += n; return; }
+          var rest = [];
+          outbox.forEach(function (b) {
+            var sent = navigator.sendBeacon(COUNT_API, new Blob([JSON.stringify({ n: b.n, batch: b.id })], { type: "text/plain" }));
+            if (sent) noteServerTotal(serverTotal + b.n); else rest.push(b);
+          });
+          outbox = rest;
+          return;
         }
-        fetch(COUNT_API, { method: "POST", headers: { "Content-Type": "application/json" }, body: body, keepalive: true })
+        if (flushing) return;
+        var b = outbox[0];
+        flushing = true;
+        fetch(COUNT_API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ n: b.n, batch: b.id }), keepalive: true })
           .then(function (r) { return r.json(); })
-          .then(function (j) { if (j && typeof j.count === "number") serverTotal = j.count; else serverTotal += n; })
-          .catch(function () { pendingGrains += n; });
+          .then(function (j) { outbox.shift(); if (j) noteServerTotal(j.count); flushing = false; if (outbox.length) pumpOutbox(false); })
+          .catch(function () { flushing = false; /* the batch keeps its id, so a retry can never double-count */ });
       }
       fetchTotal();
-      setInterval(function () { flushGrains(false); }, 3000);
+      setInterval(function () { pumpOutbox(false); }, 3000);
       setInterval(fetchTotal, 30000);
-      document.addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") flushGrains(true); });
-      window.addEventListener("pagehide", function () { flushGrains(true); });
+      document.addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") pumpOutbox(true); });
+      window.addEventListener("pagehide", function () { pumpOutbox(true); });
 
       /* ---------------- Main loop ---------------- */
       var last = performance.now();
@@ -809,7 +846,7 @@
 
         /* worldwide total is REAL: it moves only when grains are
            actually burned, here or by other visitors (server-synced) */
-        globalCount = serverTotal + pendingGrains;
+        globalCount = serverTotal + pendingGrains + outboxSum();
 
         /* Smoke emission scales with the heat AND with how much incense
            has been burned in total: the more grains, the thicker the
